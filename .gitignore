@@ -1,0 +1,9 @@
+docs/
+notebooks/
+archive/
+1505.04597v1.txt
+project_info.txt
+list_test_data.py
+check_setup.py
+__pycache__/
+*.pyc
