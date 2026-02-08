@@ -9,7 +9,7 @@ from src.utils.augmentation import get_train_transforms, get_val_transforms
 from tqdm import tqdm
 
 class EarlyStopping:
-    def __init__(self, patience=15, min_delta=0, target_metric=0.85):
+    def __init__(self, patience=20, min_delta=1e-4, target_metric=0.90):
         self.patience = patience
         self.min_delta = min_delta
         self.target_metric = target_metric
@@ -33,8 +33,8 @@ def train():
     base_path = "archive"
     batch_size = 4 
     accumulation_steps = 8 # Effective batch size = 32
-    lr = 3e-4 
-    epochs = 100 # Increased for better convergence
+    lr = 5e-4  # Slightly higher initial learning rate
+    epochs = 150  # Increased for better convergence
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -59,20 +59,22 @@ def train():
     # Loss and Optimizer
     criterion = nn.BCEWithLogitsLoss()
     dice_loss_fn = DiceLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     
-    # OneCycleLR Scheduler
+    # OneCycleLR Scheduler - Fixed: use total steps instead of steps_per_epoch
+    total_steps = (len(train_loader) // accumulation_steps + 1) * epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=lr, 
-        steps_per_epoch=len(train_loader) // accumulation_steps, 
-        epochs=epochs
+        total_steps=total_steps,
+        pct_start=0.3,
+        anneal_strategy='cos'
     )
     
     # Scaler for Mixed Precision
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
     
-    # Early Stopping
-    early_stopping = EarlyStopping(patience=15, target_metric=0.85)
+    # Early Stopping - Target 0.90 Dice score
+    early_stopping = EarlyStopping(patience=20, min_delta=1e-4, target_metric=0.90)
     
     # Training Loop
     best_dice = 0.0
@@ -90,10 +92,11 @@ def train():
             
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 outputs = model(images)
-                # Combined Loss: 1.0 * Dice + 0.5 * BCE (Better balance for small regions)
+                # Combined Loss: Consistent with validation
+                # 0.7 * Dice Loss + 0.3 * BCE Loss
                 bce_loss = criterion(outputs, masks)
                 dice_l = dice_loss_fn(outputs, masks)
-                loss = (0.5 * bce_loss + dice_l) / accumulation_steps
+                loss = (0.7 * dice_l + 0.3 * bce_loss) / accumulation_steps
             
             scaler.scale(loss).backward()
             
@@ -101,7 +104,7 @@ def train():
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-                scheduler.step()
+                scheduler.step()  # Step scheduler after optimizer step
             
             epoch_loss += loss.item() * accumulation_steps
             with torch.no_grad():
@@ -140,9 +143,10 @@ def validate(model, loader, criterion, dice_loss_fn, device):
             images, masks = images.to(device), masks.to(device)
             outputs = model(images)
             
+            # Use same loss weights as training for consistency
             bce_loss = criterion(outputs, masks)
             dice_l = dice_loss_fn(outputs, masks)
-            loss = bce_loss + dice_l
+            loss = 0.7 * dice_l + 0.3 * bce_loss
             
             val_loss += loss.item()
             val_dice += dice_coeff(outputs, masks).item()
