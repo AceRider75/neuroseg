@@ -7,3 +7,6 @@ list_test_data.py
 check_setup.py
 __pycache__/
 *.pyc
+TRAINING_FIXES.md
+*.md
+*.png
