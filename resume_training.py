@@ -338,7 +338,6 @@ def main():
         mode='max',  # Maximize Dice
         factor=0.5,  # Reduce LR by 50% when plateau detected
         patience=5,  # Wait 5 epochs before reducing
-        verbose=True,
         min_lr=1e-6
     )
 
