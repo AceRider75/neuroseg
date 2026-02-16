@@ -250,11 +250,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, dice_loss, focal_loss
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            # Step scheduler after optimizer step
-            try:
-                scheduler.step()
-            except Exception:
-                pass
+            # ReduceLROnPlateau is stepped after validation, not in training loop
 
         # Metrics
         with torch.no_grad():
@@ -283,7 +279,7 @@ def main():
     # Hyperparameters
     batch_size = 16
     accumulation_steps = 2
-    lr = 1e-3
+    lr = 1e-4  # Much lower for fine-tuning (was 1e-3 which caused oscillations)
     epochs = 300
     warmup_epochs = 10
     early_stop_patience = 35
@@ -291,14 +287,15 @@ def main():
     resume_epoch = 106
 
     print(f"\n{'='*60}")
-    print(f"RESUME TRAINING")
+    print(f"RESUME TRAINING - FINE-TUNING MODE")
     print(f"{'='*60}")
     print(f"Resuming from epoch: {resume_epoch}")
     print(f"Current Dice: 0.8426 (84.26%)")
     print(f"Target Dice: {early_stop_target} ({early_stop_target*100:.0f}%)")
     print(f"Remaining epochs: {epochs - resume_epoch}")
     print(f"Batch size: {batch_size} (effective: {batch_size * accumulation_steps})")
-    print(f"Learning rate: {lr}")
+    print(f"Learning rate: {lr} (lowered for fine-tuning stability)")
+    print(f"Scheduler: ReduceLROnPlateau (adaptive)")
     print(f"{'='*60}\n")
 
     # Load model
@@ -338,49 +335,36 @@ def main():
     focal_loss = FocalLoss(alpha=0.25, gamma=2.0)
     boundary_loss = BoundaryLoss()
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, amsgrad=True)
+    # Optimizer with LOWER LR for resumed fine-tuning
+    # Critical: resuming at epoch 106 means we're mid-convergence
+    # Using 1e-3 causes oscillation; use 1e-4 for fine-tuning
+    finetune_lr = 1e-4  # Much lower for stability
+    optimizer = torch.optim.AdamW(model.parameters(), lr=finetune_lr, weight_decay=1e-4, amsgrad=True)
 
-    # Scheduler (reset for resumed training)
-    # Calculate total steps from current epoch onward
-    total_steps = ((len(train_loader) // accumulation_steps + 1) * (epochs - resume_epoch))
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # Scheduler: Use ReduceLROnPlateau for resumed training
+    # This backs off LR when validation Dice stops improving
+    # Much more stable than trying to restart OneCycleLR mid-convergence
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        max_lr=lr,
-        total_steps=total_steps,
-        pct_start=warmup_epochs / (epochs - resume_epoch),
-        anneal_strategy='cos',
-        cycle_momentum=False,
-        div_factor=1e5,
-        final_div_factor=1e4
+        mode='max',  # Maximize Dice
+        factor=0.5,  # Reduce LR by 50% when plateau detected
+        patience=5,  # Wait 5 epochs before reducing
+        verbose=True,
+        min_lr=1e-6
     )
 
     # Mixed precision scaler
     scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
 
-    # If checkpoint contains optimizer/scheduler/scaler state, load them to resume properly
-    if isinstance(checkpoint, dict):
-        try:
-            if 'optimizer_state_dict' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                print('✓ Loaded optimizer state from checkpoint')
-        except Exception as e:
-            print(f'⚠ Could not load optimizer state: {e}')
-
-        try:
-            if 'scheduler_state_dict' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                print('✓ Loaded scheduler state from checkpoint')
-        except Exception as e:
-            print(f'⚠ Could not load scheduler state: {e}')
-
-        try:
-            if 'scaler_state_dict' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                print('✓ Loaded scaler state from checkpoint')
-        except Exception:
-            # scaler state is optional and may not exist on older checkpoints
-            pass
+    print(f"\n{'='*60}")
+    print("RESUMED FINE-TUNING CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"Learning Rate (Fine-tuning): {finetune_lr}")
+    print(f"Scheduler: ReduceLROnPlateau")
+    print(f"  - Factor: 0.5 (cut LR in half when plateau)")
+    print(f"  - Patience: 5 epochs without improvement")
+    print(f"  - Min LR: 1e-6")
+    print(f"{'='*60}\n")
 
     # Metrics tracker (load previous history if exists)
     print("Checking for previous training history...")
@@ -476,6 +460,9 @@ def main():
         # Check if reached target
         if val_dice >= early_stop_target:
             print(f"\n  ✓✓ TARGET REACHED: {val_dice:.4f} >= {early_stop_target}")
+
+        # Step ReduceLROnPlateau scheduler based on val_dice
+        scheduler.step(val_dice)
 
         # Early stopping
         if patience_counter >= early_stop_patience:
