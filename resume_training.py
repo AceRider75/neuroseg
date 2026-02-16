@@ -189,8 +189,8 @@ def validate(model, val_loader, dice_loss, focal_loss, boundary_loss, device):
         for images, masks in val_loader:
             images, masks = images.to(device), masks.to(device)
 
-            # Forward pass
-            with torch.cuda.amp.autocast():
+            # Forward pass (use autocast when CUDA available)
+            with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
                 outputs = model(images)
 
             # Loss
@@ -215,7 +215,7 @@ def validate(model, val_loader, dice_loss, focal_loss, boundary_loss, device):
     return avg_val_loss, avg_dice, avg_iou
 
 def train_epoch(model, train_loader, optimizer, scheduler, dice_loss, focal_loss, boundary_loss, 
-                device, accumulation_steps=2):
+                device, scaler, accumulation_steps=2):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -224,11 +224,12 @@ def train_epoch(model, train_loader, optimizer, scheduler, dice_loss, focal_loss
     num_batches = 0
 
     pbar = tqdm(train_loader, desc="Training", leave=False)
+    optimizer.zero_grad()
     for batch_idx, (images, masks) in enumerate(pbar):
         images, masks = images.to(device), masks.to(device)
 
         # Forward pass with autocast
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
             outputs = model(images)
 
             # Combined loss
@@ -237,15 +238,23 @@ def train_epoch(model, train_loader, optimizer, scheduler, dice_loss, focal_loss
             boundary_l = boundary_loss(outputs, masks)
             loss = (0.6 * dice_l + 0.3 * focal_l + 0.1 * boundary_l) / accumulation_steps
 
-        # Backward pass
-        loss.backward()
+        # Scaled backward
+        scaler.scale(loss).backward()
 
-        # Accumulation
+        # Accumulation step
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+            # Unscale & clip
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
+
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
+            # Step scheduler after optimizer step
+            try:
+                scheduler.step()
+            except Exception:
+                pass
 
         # Metrics
         with torch.no_grad():
@@ -346,6 +355,33 @@ def main():
         final_div_factor=1e4
     )
 
+    # Mixed precision scaler
+    scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
+
+    # If checkpoint contains optimizer/scheduler/scaler state, load them to resume properly
+    if isinstance(checkpoint, dict):
+        try:
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print('✓ Loaded optimizer state from checkpoint')
+        except Exception as e:
+            print(f'⚠ Could not load optimizer state: {e}')
+
+        try:
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                print('✓ Loaded scheduler state from checkpoint')
+        except Exception as e:
+            print(f'⚠ Could not load scheduler state: {e}')
+
+        try:
+            if 'scaler_state_dict' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                print('✓ Loaded scaler state from checkpoint')
+        except Exception:
+            # scaler state is optional and may not exist on older checkpoints
+            pass
+
     # Metrics tracker (load previous history if exists)
     print("Checking for previous training history...")
     prev_history = None
@@ -408,7 +444,7 @@ def main():
         # Train
         train_loss, train_dice, train_iou = train_epoch(
             model, train_loader, optimizer, scheduler, dice_loss, focal_loss, 
-            boundary_loss, device, accumulation_steps
+            boundary_loss, device, scaler, accumulation_steps
         )
 
         # Validate
