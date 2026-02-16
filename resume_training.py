@@ -286,18 +286,7 @@ def main():
     early_stop_target = 0.92
     resume_epoch = 106
 
-    print(f"\n{'='*60}")
-    print(f"RESUME TRAINING - FINE-TUNING MODE")
-    print(f"{'='*60}")
-    print(f"Resuming from epoch: {resume_epoch}")
-    print(f"Current Dice: 0.8426 (84.26%)")
-    print(f"Target Dice: {early_stop_target} ({early_stop_target*100:.0f}%)")
-    print(f"Remaining epochs: {epochs - resume_epoch}")
-    print(f"Batch size: {batch_size} (effective: {batch_size * accumulation_steps})")
-    print(f"Learning rate: {lr} (lowered for fine-tuning stability)")
-    print(f"Scheduler: ReduceLROnPlateau (adaptive)")
-    print(f"{'='*60}\n")
-
+    
     # Load model
     print("Loading model from best_model.pth...")
     # UNet in src/models/unet.py expects (n_channels, n_classes)
