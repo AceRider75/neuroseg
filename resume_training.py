@@ -308,14 +308,17 @@ def main():
 
     # Data
     print("Loading data...")
-    train_data, val_data = get_data_split(
-        data_dir='archive/kaggle_3m',
-        train_split=0.8,
-        seed=42
+    # get_data_split(base_path, test_size=0.15, val_size=0.15, random_seed=42)
+    # base_path should point to the folder containing 'kaggle_3m'
+    train_df, val_df, test_df = get_data_split(
+        base_path='archive',
+        test_size=0.15,
+        val_size=0.15,
+        random_seed=42
     )
 
-    train_dataset = MRIProjectDataset(train_data, transforms=get_train_transforms())
-    val_dataset = MRIProjectDataset(val_data, transforms=get_val_transforms())
+    train_dataset = MRIProjectDataset(train_df, transform=get_train_transforms())
+    val_dataset = MRIProjectDataset(val_df, transform=get_val_transforms())
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
