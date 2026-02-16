@@ -294,7 +294,8 @@ def main():
 
     # Load model
     print("Loading model from best_model.pth...")
-    model = UNet(in_channels=3, out_channels=1)
+    # UNet in src/models/unet.py expects (n_channels, n_classes)
+    model = UNet(3, 1)
     checkpoint = torch.load('best_model.pth', map_location=device)
     
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
